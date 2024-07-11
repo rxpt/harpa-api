@@ -1,212 +1,172 @@
 const Hymn = require("../models/Hymn");
 const cache = require("../utils/cache");
 
-// Função auxiliar para lidar com paginação
-const paginate = (page, limit) => {
-  const safePage = Math.max(1, parseInt(page) || 1);
-  const safeLimit = Math.min(50, parseInt(limit) || 10);
-  const skip = (safePage - 1) * safeLimit;
-  return { page: safePage, limit: safeLimit, skip };
+const PROJECTION_FIELDS = "title number -_id";
+
+const getPagination = (page, limit) => {
+  const currentPage = Math.max(1, parseInt(page, 10) || 1);
+  const itemsPerPage = Math.min(50, parseInt(limit, 10) || 10);
+  const offset = (currentPage - 1) * itemsPerPage;
+  return { currentPage, itemsPerPage, offset };
 };
 
-// Função auxiliar para lidar com busca e paginação
-const searchWithPagination = async (
+const searchHymnsWithPagination = async (
   query,
   projection,
   page,
   limit,
-  cacheKey
+  cacheKey,
+  sortOrder = 1
 ) => {
-  const { skip } = paginate(page, limit);
+  const { currentPage, itemsPerPage, offset } = getPagination(page, limit);
+
   let totalHymns = cache.get(`${cacheKey}_totalHymns`);
   if (!totalHymns) {
     totalHymns = await Hymn.countDocuments(query);
     cache.set(`${cacheKey}_totalHymns`, totalHymns);
   }
-  let hymns = cache.get(`${cacheKey}_hymns_${page}_${limit}`);
+
+  let hymns = cache.get(
+    `${cacheKey}_hymns_${currentPage}_${itemsPerPage}_${sortOrder}`
+  );
   if (!hymns) {
-    hymns = await Hymn.find(query, projection).skip(skip).limit(limit).lean();
-    cache.set(`${cacheKey}_hymns_${page}_${limit}`, hymns);
+    hymns = await Hymn.find(query, projection)
+      .sort({ number: sortOrder })
+      .skip(offset)
+      .limit(itemsPerPage)
+      .lean();
+    cache.set(
+      `${cacheKey}_hymns_${currentPage}_${itemsPerPage}_${sortOrder}`,
+      hymns
+    );
   }
-  return { hymns, totalHymns };
+
+  const totalPages = Math.ceil(totalHymns / itemsPerPage);
+  const prevPage = currentPage > 1 ? currentPage - 1 : null;
+  const nextPage = currentPage < totalPages ? currentPage + 1 : null;
+
+  return {
+    totalHymns,
+    totalPages,
+    currentPage,
+    prevPage,
+    nextPage,
+    hymns,
+  };
 };
 
-// Listar números dos hinos
-const listHymns = async (req, res) => {
+const findAdjacentHymns = async (number) => {
+  const [prevHymn, nextHymn] = await Promise.all([
+    Hymn.findOne({ number: { $lt: number } }, PROJECTION_FIELDS)
+      .sort({ number: -1 })
+      .lean(),
+    Hymn.findOne({ number: { $gt: number } }, PROJECTION_FIELDS)
+      .sort({ number: 1 })
+      .lean(),
+  ]);
+  return { prevHymn, nextHymn };
+};
+
+const handleHymnRequest = async (req, res, query, cacheKeyPrefix) => {
   try {
-    const { page, limit } = paginate(req.query.page, req.query.limit);
-    const cacheKey = "listHymns";
-    const { hymns, totalHymns } = await searchWithPagination(
-      {},
-      "number title -_id",
-      page,
-      limit,
-      cacheKey
+    const { currentPage, itemsPerPage } = getPagination(
+      req.query.page,
+      req.query.limit
     );
-    res.json({
-      hymns,
-      currentPage: page,
-      totalPages: Math.ceil(totalHymns / limit),
-    });
+    const sortOrder = req.query.sortOrder === "desc" ? -1 : 1;
+    const cacheKey = `${cacheKeyPrefix}_${JSON.stringify(query)}`;
+
+    const response = await searchHymnsWithPagination(
+      query,
+      PROJECTION_FIELDS,
+      currentPage,
+      itemsPerPage,
+      cacheKey,
+      sortOrder
+    );
+
+    if (response.hymns.length === 0) {
+      return res.status(404).json({ error: "Nenhum hino encontrado" });
+    }
+
+    res.json(response);
   } catch (error) {
     console.error(error);
-    res.status(500).json({ error: "Erro ao listar hinos" });
+    res.status(500).json({ error: "Erro ao buscar hinos" });
   }
 };
 
-// Retornar um hino aleatório
-const getRandomHymn = async (req, res) => {
+const listHymns = (req, res) => handleHymnRequest(req, res, {}, "listHymns");
+
+const getRandomHymn = async (_, res) => {
   try {
-    const count = cache.get("hymnCount") || (await Hymn.countDocuments());
-    cache.set("hymnCount", count);
-    const random = Math.floor(Math.random() * count);
-    const cacheKey = `randomHymn_${random}`;
-    let hymn = cache.get(cacheKey);
-    if (!hymn) {
-      hymn = await Hymn.findOne({}, "-_id").skip(random).lean();
-      if (!hymn)
-        return res.status(404).json({ error: "Nenhum hino encontrado" });
-      cache.set(cacheKey, hymn);
-    }
-    const [prevHymn, nextHymn] = await Promise.all([
-      Hymn.findOne({ number: { $lt: hymn.number } }, "number title -_id")
-        .sort({ number: -1 })
-        .lean(),
-      Hymn.findOne({ number: { $gt: hymn.number } }, "number title -_id")
-        .sort({ number: 1 })
-        .lean(),
-    ]);
-    res.json({
-      hymn,
-      prevHymn,
-      nextHymn,
-    });
+    const hymnCount = cache.get("hymnCount") || (await Hymn.countDocuments());
+    cache.set("hymnCount", hymnCount);
+
+    const randomIndex = Math.floor(Math.random() * hymnCount);
+    const hymn = await Hymn.findOne({}, "-_id").skip(randomIndex).lean();
+
+    if (!hymn) return res.status(404).json({ error: "Nenhum hino encontrado" });
+
+    const { prevHymn, nextHymn } = await findAdjacentHymns(hymn.number);
+    res.json({ hymn, prevHymn, nextHymn });
   } catch (error) {
     console.error(error);
     res.status(500).json({ error: "Erro ao buscar hino aleatório" });
   }
 };
 
-// Detalhes do hino
 const getHymnDetails = async (req, res) => {
   try {
-    const number = parseInt(req.params.number);
-    const cacheKey = `hymnDetails_${number}`;
+    const hymnNumber = parseInt(req.params.number, 10);
+    const cacheKey = `hymnDetails_${hymnNumber}`;
+
     let hymn = cache.get(cacheKey);
     if (!hymn) {
-      hymn = await Hymn.findOne({ number }, "-_id").lean();
-      if (!hymn) {
-        return res.status(404).json({ error: "Hino não encontrado" });
-      }
+      hymn = await Hymn.findOne({ number: hymnNumber }, "-_id").lean();
+      if (!hymn) return res.status(404).json({ error: "Hino não encontrado" });
       cache.set(cacheKey, hymn);
     }
-    const [prevHymn, nextHymn] = await Promise.all([
-      Hymn.findOne({ number: { $lt: number } }, "number title -_id")
-        .sort({ number: -1 })
-        .lean(),
-      Hymn.findOne({ number: { $gt: number } }, "number title -_id")
-        .sort({ number: 1 })
-        .lean(),
-    ]);
-    res.json({
-      hymn,
-      prevHymn,
-      nextHymn,
-    });
+
+    const { prevHymn, nextHymn } = await findAdjacentHymns(hymnNumber);
+    res.json({ hymn, prevHymn, nextHymn });
   } catch (error) {
     console.error(error);
     res.status(500).json({ error: "Erro ao obter detalhes do hino" });
   }
 };
 
-// Buscar hinos por título
-const searchHymnsByTitle = async (req, res) => {
-  try {
-    const { page, limit } = paginate(req.query.page, req.query.limit);
-    const title = req.params.title;
-    const query = { title: { $regex: title, $options: "i" } };
-    const cacheKey = `searchHymnsByTitle_${title}`;
-    const { hymns, totalHymns } = await searchWithPagination(
-      query,
-      "title number -_id",
-      page,
-      limit,
-      cacheKey
-    );
-    if (hymns.length === 0)
-      return res.status(404).json({ error: "Nenhum hino encontrado" });
-    res.json({
-      hymns,
-      currentPage: page,
-      totalPages: Math.ceil(totalHymns / limit),
-    });
-  } catch (error) {
-    console.error(error);
-    res.status(500).json({ error: "Erro ao buscar hinos por título" });
-  }
-};
+const searchHymnsByTitle = (req, res) =>
+  handleHymnRequest(
+    req,
+    res,
+    { title: { $regex: req.params.searchParam, $options: "i" } },
+    "searchHymnsByTitle"
+  );
 
-// Buscar hinos por estrofe
-const searchHymnsByVerse = async (req, res) => {
-  try {
-    const { page, limit } = paginate(req.query.page, req.query.limit);
-    const verse = req.params.verse;
-    const query = { "verses.lyrics": { $regex: verse, $options: "i" } };
-    const cacheKey = `searchHymnsByVerse_${verse}`;
-    const { hymns, totalHymns } = await searchWithPagination(
-      query,
-      "title number -_id",
-      page,
-      limit,
-      cacheKey
-    );
-    if (hymns.length === 0)
-      return res.status(404).json({ error: "Nenhum hino encontrado" });
-    res.json({
-      hymns,
-      currentPage: page,
-      totalPages: Math.ceil(totalHymns / limit),
-    });
-  } catch (error) {
-    console.error(error);
-    res.status(500).json({ error: "Erro ao buscar hinos por estrofe" });
-  }
-};
+const searchHymnsByVerse = (req, res) =>
+  handleHymnRequest(
+    req,
+    res,
+    { "verses.lyrics": { $regex: req.params.searchParam, $options: "i" } },
+    "searchHymnsByVerse"
+  );
 
-// Buscar hinos por número semelhante
-const searchHymnsByNumber = async (req, res) => {
-  try {
-    const { page, limit } = paginate(req.query.page, req.query.limit);
-    const number = req.params.number;
-    const query = {
+const searchHymnsByNumber = (req, res) =>
+  handleHymnRequest(
+    req,
+    res,
+    {
       $expr: {
         $regexMatch: {
           input: { $toString: "$number" },
-          regex: number,
+          regex: String(req.params.number),
           options: "i",
         },
       },
-    };
-    const cacheKey = `searchHymnsByNumber_${number}`;
-    const { hymns, totalHymns } = await searchWithPagination(
-      query,
-      "number title -_id",
-      page,
-      limit,
-      cacheKey
-    );
-    if (hymns.length === 0)
-      return res.status(404).json({ error: "Nenhum hino encontrado" });
-    res.json({
-      hymns,
-      currentPage: page,
-      totalPages: Math.ceil(totalHymns / limit),
-    });
-  } catch (error) {
-    console.error(error);
-    res.status(500).json({ error: "Erro ao buscar hinos por número" });
-  }
-};
+    },
+    "searchHymnsByNumber"
+  );
 
 module.exports = {
   listHymns,

@@ -1,66 +1,45 @@
 const express = require("express");
-const { param, query } = require("express-validator");
-const {
-  listHymns,
-  getRandomHymn,
-  getHymnDetails,
-  searchHymnsByTitle,
-  searchHymnsByVerse,
-  searchHymnsByNumber,
-} = require("../controllers/hymnController");
-const validate = require("../middlewares/validation");
 const router = express.Router();
+const { param, query } = require("express-validator");
+const validate = require("../middlewares/validation");
+const hymnController = require("../controllers/hymnController");
 
-router.get(
-  "/",
-  validate([
-    query("page").optional().isInt({ min: 1 }).toInt(),
-    query("limit").optional().isInt({ min: 1, max: 50 }).toInt(),
-  ]),
-  listHymns
-);
+const commonQueryValidation = [
+  query("page").optional().isInt({ min: 1 }).toInt(),
+  query("limit").optional().isInt({ min: 1, max: 50 }).toInt(),
+  query("sortOrder").optional().isIn(["asc", "desc"]),
+];
 
-router.get("/random", getRandomHymn);
+const titleOrVerseValidation = [
+  ...commonQueryValidation,
+  param("searchParam").isString().trim().escape(),
+];
 
-router.get(
-  "/search/title/:title",
-  validate([
-    query("page").optional().isInt({ min: 1 }).toInt(),
-    query("limit").optional().isInt({ min: 1, max: 50 }).toInt(),
-    param("title").isString().trim().escape(),
-  ]),
-  searchHymnsByTitle
-);
+const numberValidation = [
+  param("number")
+    .isInt()
+    .withMessage("O número do hino deve ser um inteiro")
+    .toInt(),
+];
 
-router.get(
-  "/search/verse/:verse",
-  validate([
-    query("page").optional().isInt({ min: 1 }).toInt(),
-    query("limit").optional().isInt({ min: 1, max: 50 }).toInt(),
-    param("verse").isString().trim().escape(),
-  ]),
-  searchHymnsByVerse
-);
-
-router.get(
-  "/search/number/:number",
-  validate([
-    query("page").optional().isInt({ min: 1 }).toInt(),
-    query("limit").optional().isInt({ min: 1, max: 50 }).toInt(),
-    param("number").isString().trim().escape(),
-  ]),
-  searchHymnsByNumber
-);
-
-router.get(
-  "/:number",
-  validate([
-    param("number")
-      .isInt()
-      .withMessage("O número do hino deve ser um inteiro")
-      .toInt(),
-  ]),
-  getHymnDetails
-);
+router
+  .get("/", validate(commonQueryValidation), hymnController.listHymns)
+  .get(
+    "/search/title/:searchParam",
+    validate(titleOrVerseValidation),
+    hymnController.searchHymnsByTitle
+  )
+  .get(
+    "/search/verse/:searchParam",
+    validate(titleOrVerseValidation),
+    hymnController.searchHymnsByVerse
+  )
+  .get(
+    "/search/number/:number",
+    validate([...commonQueryValidation, ...numberValidation]),
+    hymnController.searchHymnsByNumber
+  )
+  .get("/random", hymnController.getRandomHymn)
+  .get("/:number", validate(numberValidation), hymnController.getHymnDetails);
 
 module.exports = router;
